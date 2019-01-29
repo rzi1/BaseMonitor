@@ -1,0 +1,666 @@
+--[[
+    Base Monitor(oc) 1.8
+        This script allows you to monitor caches, tanks, barrels and chests
+        Monitoring chests requires an open peripheral proxy, the same goes for
+        buildcraft tanks.
+        You can build one of more computers and set one of them as the main server by
+        setting isMain to true. This will let it receive information from other computers.
+        For the main server to receive info from other computers you need to attach a
+        wireless modem to each computer.
+        Peripherals can be attached to any side you like, the script will automatically
+        work out where the peripherals are.
+Changes since 1.7
+        Changed the sorting of the items to be alphabetical
+    Changes since 1.6
+        Made significant changed to how peripherals are checked and processed.
+        Redesigned how the contents is processed and stored so that there is a timestamp.
+        The timestamp allows remote computer information to be processed correctly.
+        Each computer must have a unique id set, if the same id is used for two systems,
+        then the last one to update the table will win and you won't see all the content.
+        Added ItemsFullPercentAt, EnergyFullPercentAt and FluidFullPercentAt to set what
+        level is considered full. Added support for the OC XNet Driver.
+    Changes since 1.5
+        First version of Base Monitor for OpenComputers
+        Still in a very eary testing phase, no wireless testing has started yet.
+        See http://youtu.be/KT-2hKjUpGA for the ComputerCraft version
+--]]
+component = require("component")
+event = require("event")
+os = require("os")
+term = require("term")
+local updateCount = 0;
+-- Below are values you can change
+local isMain = false;
+--local id = os.computerID();
+local id = "Main Base";
+local VersionInfo = "Base Monitor(oc) 1.8";
+
+local titleTextColor = 0x0000FF;
+local titleBackColor = 0xFFFFFF;
+local tankTextColor = 0xEBFF0B;
+local tankBackColor = 0x2A8E2A;
+local chestTextColor = 0xFFFFFF;
+local chestBackColor = 0x37ADAD;
+local gasTextColor = 0xFFFFFF;
+local gasBackColor = 0xAA00AA;
+local powerTextColor = 0xFFA800;
+local powerBackColor = 0xFF00AA;
+
+local UpdateIntervalSeconds = 60;
+
+local ItemsFullPercentAt = 640;
+local EnergyFullPercentAt = 2000000;
+local FluidFullPercentAt = 640000;
+local GasFullPercentAt = 640000;
+
+--component.gpu.setResolution(140,40);
+
+--[[
+    Add or remove values here to exclude items from being displayed.
+    It is case insensitive and it will look for matches.
+    So an item called "Nether Brick" will not be displayed if any of the following is set
+    "Brick","brick","rick","ck"
+    This also means that of you set a filter call "iron" then it will remove all items containing iron.
+    it will not show Iron Ore, Iron Block, Iron Helmet, etc.
+--]]
+local blacklist = {"Flesh","Nugget","Brain","Sapling","Seed","egg","eye"};
+--[[
+    Add or remove values here to only show items matching these names.
+    It is case insensitive and it will look for matches.
+    So an item called "Nether Brick" will be displayed if any of the following is set
+    "Brick","brick","rick","ck"
+    This also means that of you set a filter called "iron" then it will show all items containing iron.
+    it will show show Iron Ore, Iron Block, Iron Helmet, etc.
+    To disable the whitelist set it to local whitelist = "";
+    To enable the whitelist set it to local whitelist = {"Diamond","Gold"};
+--]]
+local whitelist = "";
+--local whitelist = {"Ingot"};
+
+local NameLen = 17;
+local mainChannel = 2;
+
+-- Above are values you can change
+
+function statuslog(strMsg)
+    local x,y = component.gpu.getResolution();
+    term.setCursor(1,y);
+    term.clearLine();
+    term.write(strMsg);
+end
+
+function printclock()
+    local x,y = component.gpu.getResolution();
+    term.setCursor(x-5,1);
+    local now = os.date();
+    now = string.sub(now,string.find(now," ")+1,-4)
+    term.write(now);
+end
+
+statuslog("Starting "..VersionInfo);
+--local mon;
+local wmod;
+local x,y;
+local CurColumn = 0;
+local MaxColumn;
+local ColumnWidth;
+local CurLine = 2;
+local ContentData = {};
+
+function padString (sText, iLen)
+    local iTextLen = string.len(sText);
+    -- Too short, pad
+    if (iTextLen < iLen) then
+        local iDiff = iLen - iTextLen;
+        return(sText..string.rep(" ",iDiff));
+    end
+    -- Too long, trim
+    if (iTextLen > iLen) then
+        return(string.sub(sText,1,iLen));
+    end
+    -- Exact length
+    return(sText);
+end
+
+function checkDepth()
+    if (component.gpu.getDepth() == 1) then
+        titleTextColor = 0x000000;
+        titleBackColor = 0xffffff;
+        tankTextColor = 0x000000;
+        tankBackColor = 0xffffff;
+        chestTextColor = 0x000000;
+        chestBackColor = 0xffffff;
+        gasTextColor = 0x000000;
+        gasBackColor = 0xffffff;
+        powerTextColor = 0x000000;
+        powerBackColor = 0xffffff;
+    end
+end
+
+function updateTable(strSource,strName,strAmount,timestamp,strLegend)
+    local isWhitelisted = true;
+    if (type(whitelist) == "table") then
+        isWhitelisted = false;
+        for l,filter in pairs(whitelist) do
+            if (string.find(string.lower(strName),string.lower(filter)) ~= nil) then
+                isWhitelisted = true;
+            end
+        end
+    end
+    if (isWhitelisted == false) then
+        return;
+    end
+    if (type(blacklist) == "table") then
+        for l,filter in pairs(blacklist) do
+            if (string.find(string.lower(strName),string.lower(filter)) ~= nil) then
+                return;
+            end
+        end
+    end
+    if (ContentData[strSource] == nil) then
+        ContentData[strSource] = {};
+    end
+    if (ContentData[strSource][timestamp] == nil) then
+        ContentData[strSource][timestamp] = {};
+    end
+    if (ContentData[strSource][timestamp][strName] == nil) then
+        ContentData[strSource][timestamp][strName] = {};
+    end
+    if (ContentData[strSource][timestamp][strName]["count"] == nil) then
+        ContentData[strSource][timestamp][strName]["count"] = strAmount;
+    else
+        ContentData[strSource][timestamp][strName]["count"] = ContentData[strSource][timestamp][strName]["count"] + strAmount;
+    end
+    ContentData[strSource][timestamp][strName]["legend"] = strLegend;
+end
+
+function printmon(strName,strAmount,strMax,strLegend)
+    local textColor;
+    local backColor;
+    local FullPercentAt = ItemsFullPercentAt;
+    if (strLegend == "#") then
+        textColor = chestTextColor;
+        backColor = chestBackColor;
+        strLegend = "";
+    end
+    if (strLegend == "+") then
+        textColor = tankTextColor;
+        backColor = tankBackColor;
+        FullPercentAt = FluidFullPercentAt;
+        strLegend = "";
+    end
+    if (strLegend == "*") then
+        textColor = powerTextColor;
+        backColor = powerBackColor;
+        FullPercentAt = EnergyFullPercentAt;
+        strLegend = "";
+    end
+    if (strLegend == "$") then
+        textColor = gasTextColor;
+        backColor = gasBackColor;
+        FullPercentAt = GasFullPercentAt;
+        strLegend = "";
+    end
+    local line = string.format("%s  %3i%s",padString(strName,NameLen+1),strAmount,padString(strLegend,1));
+    if (strAmount >= 1000000) then
+        line = string.format("%s  %3iM%s",padString(strName,NameLen),math.floor(strAmount/1000000),padString(strLegend,1));
+    elseif (strAmount >= 1000) then
+        line = string.format("%s  %3iK%s",padString(strName,NameLen),math.floor(strAmount/1000),padString(strLegend,1));
+    end
+
+    local ColPadding = 0;
+    if (CurColumn > 0) then
+        ColPadding = 1;
+    end
+    local CurX = math.floor((CurColumn*ColumnWidth))+math.floor(CurColumn*ColPadding)+1;
+ if (CurColumn == 0) then
+    --  statuslog("CurX:"..CurX);
+ end
+    term.setCursor(CurX,CurLine);
+    local percent = 0;
+    if (strMax == 0) then
+        percent = strAmount / FullPercentAt * 100;
+    else
+        percent = strAmount / strMax * 100;
+    end
+    component.gpu.setBackground(backColor);
+    if ((strAmount >= FullPercentAt) and (strMax == 0)) then
+        percent = 100;
+    end
+    local barlength = math.floor(percent / 100 * (string.len(line)-1));
+ --if (CurColumn == 0) then
+   --barlength = barlength + 1;
+ --end
+
+    if (string.len(line) > barlength) then
+        local msg = string.sub(line,1,barlength);
+        component.gpu.setForeground(textColor);
+        term.write(msg);
+        if (percent == 0) then
+            component.gpu.setBackground(backColor);
+        else
+            component.gpu.setBackground(0x000000);
+        end
+        if (component.gpu.getDepth() == 1) then
+            component.gpu.setForeground(0xffffff);
+        end
+        term.write(string.sub(line,barlength+1,-2))
+    else
+        local spaces = barlength - string.len(line);
+        term.write(line);
+        term.write(string.rep(" ",spaces));
+    end
+
+    component.gpu.setForeground(0xFFFFFF);
+    component.gpu.setBackground(0x000000);
+    CurColumn = CurColumn + 1;
+    if (CurColumn > MaxColumn) then
+        CurColumn = 0;
+        CurLine = CurLine + 1;
+    end
+    return true;
+end
+
+-- Find the largest screen
+function findScreen()
+    for i,name in pairs(component.list()) do
+        if (component.type(i) == "screen") then
+            --prepScreen(i);
+        end
+    end
+end
+
+-- Find a wireless modem
+function findWirelessModem()
+    local foundWireless = false;
+    for i,name in pairs(component.list()) do
+        for j,method in pairs(component.methods(i)) do
+            if (method == 'isWireless') then
+                wmod = compoent.proxy(i);
+                if (wmod.isWireless()) then
+                    wmod.closeAll();
+                    foundWireless = true;
+                    break;
+                else
+                    wmod = {};
+                end
+            end
+        end
+        if (foundWireless) then
+            break;
+        end
+    end
+end
+
+function collectLocalInfo()
+    statuslog("Collecting local info");
+    local timestamp = os.clock();
+    ContentData = {};
+    for i,name in pairs(component.list()) do
+        local displayNames = {};
+        local items = {};
+        local p = component.proxy(i);
+        if (p.getInventorySize ~= nil) then
+            statuslog("Processing ChestTypes");
+            if (string.find(tostring(p.getInventorySize),"side:number") ~= nil) then
+                for j=0,5,1 do
+                    local chestSize = nil;
+                    chestSize = p.getInventorySize(j);
+                    if (chestSize ~= nil) then
+                        for k=1,chestSize,1 do
+                            local iteminfo = nil;
+                            if (string.find(tostring(p.getStackInSlot),"side:number") ~= nil) then
+                                iteminfo = p.getStackInSlot(j,k);
+                            else
+                                iteminfo = p.getStackInSlot(k);
+                            end
+                            if (iteminfo) then
+                                displayname = iteminfo.label;
+                                if (displayname == nil) then
+                                    displayname = iteminfo.display_name;
+                                end
+                                fingerlog = iteminfo.name;
+                                local amount = iteminfo.size;
+                                if (amount == nil) then amount = 0; end
+                                updateTable(id,displayname,amount,timestamp,"#");
+                            end
+                        end
+                    end
+                end
+            else
+                chestSize = p.getInventorySize();
+                if (chestSize ~= nil) then
+                    for k=1,chestSize,1 do
+                        local iteminfo = nil;
+                        iteminfo = p.getStackInSlot(k);
+                        if (iteminfo) then
+                            displayname = iteminfo.label;
+                            if (displayname == nil) then
+                                displayname = iteminfo.display_name;
+                            end
+                            fingerlog = iteminfo.name;
+                            local amount = iteminfo.size;
+                            if (amount == nil) then amount = 0; end
+                            updateTable(id,displayname,amount,timestamp,"#");
+                        end
+                    end
+                end
+            end
+        end
+        if (p.getFluidInTank ~= nil) then
+            statuslog("Processing Tank");
+            if (string.find(tostring(p.getFluidInTank),"side:number") ~= nil) then
+                for j=0,5,1 do
+                    local iteminfo = p.getFluidInTank(j);
+                    local label = "";
+                    local amount = 0;
+                    local capacity = 0;
+                    if (iteminfo.n ~= 0) then
+                        for k=1,iteminfo.n,1 do
+                            local label = iteminfo[k].label;
+                            if (label == nil) then
+                                label = iteminfo[k].name;
+                            end
+                            if (label == nil) then
+                                label = "Unknown";
+                            end
+                            amount = iteminfo[k].amount;
+                            capacity = iteminfo[k].capacity;
+                            if (amount > 0) then
+                                updateTable(id,label,amount,timestamp,"+");
+                            end
+                        end
+                    end
+                end
+            else
+                local iteminfo = p.getFluidInTank();
+                local label = "";
+                local amount = 0;
+                local capacity = 0;
+                if (iteminfo.n ~= 0) then
+                    for k=1,iteminfo.n,1 do
+                        local label = iteminfo[k].label;
+                        if (label == nil) then
+                            label = iteminfo[k].name;
+                        end
+                        if (label == nil) then
+                            label = "Unknown";
+                        end
+                        amount = iteminfo[k].amount;
+                        capacity = iteminfo[k].capacity;
+                        if (amount > 0) then
+                            updateTable(id,label,amount,timestamp,"+");
+                        end
+                    end
+                end
+            end
+        end
+        if (p.getEnergyStored ~= nil) then
+            statuslog("Processing Energy");
+            if (string.find(tostring(p.getEnergyStored),"side:number") ~= nil) then
+                for j=0,5,1 do
+                    local energy = p.getEnergyStored(j);
+                    updateTable(id,"Energy",energy,timestamp,"*");
+                end
+            else
+                local energy = p.getEnergyStored();
+                updateTable(id,"Energy",energy,timestamp,"*");
+            end
+        end
+        if (p.getGas ~= nil) then
+            statuslog("Processing Gas");
+            if (string.find(tostring(p.getGas),"side:number") ~= nil) then
+                for j=0,5,1 do
+                    local iteminfo = p.getGas(j);
+                    local label = "";
+                    local amount = 0;
+                    if (iteminfo) then
+                        local label = iteminfo.label;
+                        if (label == nil) then
+                            label = iteminfo.name;
+                        end
+                        if (label == nil) then
+                            label = "Unknown";
+                        end
+                        amount = iteminfo.amount;
+                        if (amount > 0) then
+                            updateTable(id,label,amount,timestamp,"$");
+                        end
+                    end
+                end
+            else
+                local iteminfo = p.getGas();
+                local label = "";
+                local amount = 0;
+                if (iteminfo) then
+                    local label = iteminfo.label;
+                    if (label == nil) then
+                        label = iteminfo.name;
+                    end
+                    if (label == nil) then
+                        label = "Unknown";
+                    end
+                    amount = iteminfo.amount;
+                    if (amount > 0) then
+                        updateTable(id,label,amount,timestamp,"$");
+                    end
+                end
+            end
+        end
+        if (p.getItemsInNetwork ~= nil) then
+            statuslog("Processing ME System");
+            if (string.find(tostring(p.getItemsInNetwork),"side:number") ~= nil) then
+                for j=0,5,1 do
+                    local itemarray = p.getItemsInNetwork(j);
+                    for j=1,itemarray.n,1 do
+                        if (itemarray[j].size > 0) then
+                            local fingerlog = itemarray[j].name;
+                            local displayName = itemarray[j].label;
+                            updateTable(id,displayName,itemarray[j].size,timestamp,"#");
+                        end
+                    end
+                end
+            else
+                local itemarray = p.getItemsInNetwork();
+                for j=1,itemarray.n,1 do
+                    if (itemarray[j].size > 0) then
+                        local fingerlog = itemarray[j].name;
+                        local displayName = itemarray[j].label;
+                        updateTable(id,displayName,itemarray[j].size,timestamp,"#");
+                    end
+                end
+            end
+        end
+        if (name == "xnet") then
+            statuslog("Processing XNet Systems");
+            local connectedBlocks = p.getConnectedBlocks();
+            for j=1,connectedBlocks.n,1 do
+                local energyinfo = p.getEnergy(connectedBlocks[j].pos);
+                if (energyinfo ~= nil) then
+                    local energy = energyinfo.stored;
+                    updateTable(id,"Energy",energy,timestamp,"*");
+                end
+                local itemarray = p.getItems(connectedBlocks[j].pos);
+                if (itemarray ~= nil) then
+                    for k=1,itemarray.n,1 do
+                        if (itemarray[k].size > 0) then
+                            local displayName = itemarray[k].label;
+                            updateTable(id,displayName,itemarray[k].size,timestamp,"#");
+                        end
+                    end
+                end
+                local fluidarray = p.getFluids(connectedBlocks[j].pos);
+                if (fluidarray ~= nil) then
+                    for k=1,fluidarray.n,1 do
+                        if (fluidarray[k].content ~= nil) then
+                            if (fluidarray[k].content.amount > 0) then
+                                local amount = fluidarray[k].content.amount;
+                                local displayName = fluidarray[k].content.label;
+                                updateTable(id,displayName,amount,timestamp,"+");
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        statuslog("Done");
+    end
+end
+
+function updateMonitor()
+    --x,y = term.getViewport();
+    x,y = component.gpu.getViewport();
+    ColumnWidth = NameLen + 7;
+    MaxColumn = math.floor(x / (ColumnWidth))-1;
+    component.gpu.setBackground(0x000000);
+    term.clear();
+    CurColumn = 0;
+    CurLine = 1;
+    term.setCursor(1,1);
+    component.gpu.setForeground(0xFFFFFF);
+    --term.setTextScale(0.5);
+    term.write(VersionInfo);
+    -- Sort by Base names
+    local sortedSources = {};
+    for n in pairs(ContentData) do
+        table.insert(sortedSources, n);
+    end
+    table.sort(sortedSources);
+    local name = "";
+    for i,source in ipairs(sortedSources) do
+        if (name ~= source) then
+            name = source;
+            CurColumn = 0;
+            component.gpu.setForeground(titleTextColor);
+            component.gpu.setBackground(titleBackColor);
+            term.setCursor(1,CurLine+1);
+            term.write(padString("Contents for "..name,x-1));
+            CurLine = CurLine + 2;
+        end
+        sortedTimestamps = {};
+        for timestamp in pairs(ContentData[source]) do
+            table.insert(sortedTimestamps,timestamp);
+        end
+        table.sort(sortedTimestamps);
+        latest = nil;
+        local maxn = 0;
+        for index in pairs(sortedTimestamps) do
+            maxn = maxn + 1;
+        end
+        for j=maxn,1,-1 do
+            if (latest == nil) then
+                latest = sortedTimestamps[j];
+            else
+                ContentData[source][sortedTimestamps[j]] = nil;
+            end
+        end
+        sortedItems = {};
+        for itemname in pairs(ContentData[source][latest]) do
+            table.insert(sortedItems,itemname);
+        end
+        table.sort(sortedItems);
+        for i in pairs(sortedItems) do
+            name = sortedItems[i];
+            count = ContentData[source][latest][name]["count"];
+            legend = ContentData[source][latest][name]["legend"];
+            max = 0;
+            printmon(name,count,max,legend);
+        end
+    end
+end
+function timerEvent()
+    statuslog("Timer Event")
+    updateCount = updateCount + 1;
+    if (updateCount >= 3) then
+        updateCount = 0;
+        ContentData = {};
+    end
+    collectLocalInfo();
+    if (wmod) then
+        if (isMain == false) then
+            wmod.transmit(mainChannel,1,ContentData);
+        end
+    end
+    --if (updateCount == 2) then
+        updateMonitor();
+    --end
+    wirelessEventCount = 0;
+end
+-- This is the main section of the script
+
+findScreen();
+checkDepth();
+findWirelessModem();
+
+if (isMain == true) then
+    if (type(wmod.isWireless) == "function") then
+        wmod.open(mainChannel);
+    else
+        statuslog("You don't have a wireless modem, and this is set as the main computer");
+    end
+end
+
+ContentData = {};
+local timerUpdate = event.timer(UpdateIntervalSeconds,timerEvent,math.huge);
+local clocktimer = event.timer(1,printclock,math.huge);
+local wirelessEventCount = 0;
+-- Perform Initial Collection and Update the Monitor
+collectLocalInfo();
+updateMonitor();
+
+-- Main program loop
+continue = true;
+statuslog("Running main loop")
+while continue do
+    --continue = false;
+    local eventname, param1, param2, param3, param4, param5 = event.pull();
+    if (eventname == nil) then eventname = "Unknown"; end
+    statuslog("Received event:"..eventname);
+    if (eventname == "interrupted") then
+        continue = false;
+    end
+    if (eventname == "timer") then
+        if (param1 == timerUpdate) then
+            updateCount = updateCount + 1;
+            if (updateCount >= 3) then
+                updateCount = 0;
+                ContentData = {};
+            end
+            collectLocalInfo();
+            if (wmod) then
+                if (isMain == false) then
+                    wmod.transmit(mainChannel,1,ContentData);
+                end
+            end
+            updateMonitor();
+            wirelessEventCount = 0;
+            -- timerUpdate = os.startTimer(5);
+            -- timerUpdate = event.timer(60,timerEvent);
+        end
+    end
+    if (eventname == "modem_message") then
+        if (isMain == true) then
+            wirelessEventCount = wirelessEventCount + 1;
+            for source,data in pairs(param4) do
+                if (ContentData[source] == nil) then
+                    ContentData[source] = {};
+                end
+            ContentData[source] = param4[source];
+        end
+            if (wirelessEventCount >= 10) then
+                timerUpdate = os.startTimer(1);
+            end
+        end
+    end
+    if (eventname == "touch") or (eventname == "monitor_resize") then
+        statuslog("Updating the Monitor");
+        updateMonitor();
+    end
+    if (eventname == "component_added") or (eventname == "component_removed") then
+        collectLocalInfo();
+        updateMonitor();
+    end
+end
+event.cancel(timerUpdate);
+event.cancel(clocktimer);
+term.clear();
